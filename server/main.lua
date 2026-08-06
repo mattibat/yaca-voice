@@ -135,6 +135,10 @@ function YacaServer:connectToVoice(src)
 end
 
 function YacaServer:registerExports()
+    exports("isEnabled", function()
+        return GetConvarBool("yaca_enabled", true)
+    end)
+
     exports("connectToVoice", function(src) self:connectToVoice(src) end)
 
     exports("getPlayerAliveStatus", function(playerId)
@@ -159,6 +163,22 @@ function YacaServer:registerExports()
 
     exports("getGlobalErrorLevel", function()
         return YacaGetGlobalErrorLevel()
+    end)
+
+    exports("setPlayerVolumeModifier", function(playerId, volumeModifier)
+        self:setPlayerVolumeModifier(playerId, volumeModifier)
+    end)
+
+    exports("getPlayerVolumeModifier", function(playerId)
+        local player = self:getPlayer(playerId)
+        if not player or not player.voiceSettings then return 1 end
+        return player.voiceSettings.volumeModifier or 1
+    end)
+
+    exports("getPlayerTeamSpeakUniqueIdentifier", function(playerId)
+        local player = self:getPlayer(playerId)
+        if not player or not player.voiceSettings then return "" end
+        return player.voiceSettings.tsUniqueIdentifier or ""
     end)
 
     exports("getPlayerIngameName", function(playerId)
@@ -200,8 +220,8 @@ function YacaServer:registerEvents()
         self:connectToVoice(source)
     end)
 
-    RegisterNetEvent("server:yaca:addPlayer", function(clientId)
-        self:addNewPlayer(source, clientId)
+    RegisterNetEvent("server:yaca:addPlayer", function(clientId, tsUniqueIdentifier)
+        self:addNewPlayer(source, clientId, tsUniqueIdentifier)
     end)
 
     RegisterNetEvent("server:yaca:wsReady", function()
@@ -239,11 +259,11 @@ function YacaServer:handlePlayerDisconnect(src)
         for targetId, emitterTargets in pairs(player.voiceSettings.emittedPhoneSpeaker) do
             local target = self.players[targetId]
             if target and target.voicePlugin then
-                local clientIds = {}
-                for emitterId in pairs(emitterTargets) do
-                    clientIds[#clientIds + 1] = emitterId
+                local callMemberIds = {}
+                for callMemberId in pairs(emitterTargets) do
+                    callMemberIds[#callMemberIds + 1] = callMemberId
                 end
-                YacaTriggerClientEvent("client:yaca:phoneHearAround", { target.voicePlugin.clientId }, clientIds, false)
+                YacaTriggerClientEvent("client:yaca:phoneHearAround", callMemberIds, { target.voicePlugin.clientId }, false)
             end
         end
     end
@@ -263,6 +283,29 @@ function YacaServer:changePlayerAliveStatus(src, alive)
     if player.voicePlugin then
         player.voicePlugin.forceMuted = not alive
     end
+end
+
+function YacaServer:setPlayerVolumeModifier(src, volumeModifier)
+    src = tonumber(src) or src
+    local player = self.players[src]
+    if not player then
+        print(YacaLocale("player_not_found", src))
+        return
+    end
+
+    if type(volumeModifier) ~= "number" then
+        print(("[YaCA] Invalid volume modifier for player %s: %s"):format(tostring(src), tostring(volumeModifier)))
+        return
+    end
+
+    local clampedModifier = YacaClamp(volumeModifier, 0.1, 2)
+    player.voiceSettings.volumeModifier = clampedModifier
+
+    if player.voicePlugin then
+        player.voicePlugin.volumeModifier = clampedModifier
+    end
+
+    TriggerClientEvent("client:yaca:setPlayerVolumeModifier", -1, src, clampedModifier)
 end
 
 function YacaServer:getPlayerAliveStatus(playerId)
@@ -319,18 +362,24 @@ function YacaServer:connect(src)
     TriggerClientEvent("client:yaca:init", src, initObject)
 end
 
-function YacaServer:addNewPlayer(src, clientId)
+function YacaServer:addNewPlayer(src, clientId, tsUniqueIdentifier)
     src = tonumber(src) or src
     local player = self.players[src]
     if not player or not clientId then return end
 
     self.initRetry[src] = nil
 
+    if tsUniqueIdentifier and tsUniqueIdentifier ~= "" then
+        player.voiceSettings.tsUniqueIdentifier = tsUniqueIdentifier
+        TriggerEvent("yaca:external:playerTeamSpeakIdentifier", src, tsUniqueIdentifier)
+    end
+
     player.voicePlugin = {
         playerId = src,
         clientId = clientId,
         forceMuted = player.voiceSettings.forceMuted,
         mutedOnPhone = player.voiceSettings.mutedOnPhone,
+        volumeModifier = player.voiceSettings.volumeModifier,
     }
 
     TriggerClientEvent("client:yaca:addPlayers", -1, player.voicePlugin)

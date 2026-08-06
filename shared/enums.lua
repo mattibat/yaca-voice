@@ -5,6 +5,14 @@ YacaFilterEnum = {
     PHONE_SPEAKER = "PHONE_SPEAKER",
     INTERCOM = "INTERCOM",
     PHONE_HISTORICAL = "PHONE_HISTORICAL",
+    AIRBORNE = "AIRBORNE",
+}
+
+YacaEffectFilterEnum = {
+    MUFFLE = "MUFFLE",
+    WATER = "WATER",
+    ECHO = "ECHO",
+    REVERB = "REVERB",
 }
 
 YacaNotificationType = {

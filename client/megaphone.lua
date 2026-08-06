@@ -17,6 +17,9 @@ local function initMegaphoneModule()
                 YacaMegaphone.megaphoneVehicleWhitelistHashes[YacaJoaat(vehicleModel)] = true
             end
         end
+    elseif YacaClient.isRedM then
+        YacaMegaphone:registerRdrKeybinds()
+        YacaMegaphone.canUseMegaphone = true
     end
 end
 
@@ -76,6 +79,14 @@ function YacaMegaphone:registerKeybinds()
     RegisterKeyMapping("+yaca:megaphone", YacaLocale("use_megaphone"), "keyboard", YacaClient.sharedConfig.keyBinds.megaphone)
 end
 
+function YacaMegaphone:registerRdrKeybinds()
+    if YacaClient.sharedConfig.keyBinds.megaphone == false then return end
+
+    YacaRegisterRdrKeyBind(YacaClient.sharedConfig.keyBinds.megaphone, function()
+        self:useMegaphone(not self.lastMegaphoneState)
+    end)
+end
+
 function YacaMegaphone:registerExports()
     exports("getCanUseMegaphone", function()
         return self.canUseMegaphone
@@ -125,10 +136,16 @@ end
 function YacaMegaphone:useMegaphone(state)
     state = state or false
 
-    if (not YacaCache.vehicle and YacaClient.sharedConfig.megaphone.automaticVehicleDetection)
-        or not self.canUseMegaphone
-        or state == self.lastMegaphoneState then
-        return
+    if YacaClient.isFiveM then
+        if (not YacaCache.vehicle and YacaClient.sharedConfig.megaphone.automaticVehicleDetection)
+            or not self.canUseMegaphone
+            or state == self.lastMegaphoneState then
+            return
+        end
+    else
+        if not self.canUseMegaphone or state == self.lastMegaphoneState then
+            return
+        end
     end
 
     self.lastMegaphoneState = not self.lastMegaphoneState

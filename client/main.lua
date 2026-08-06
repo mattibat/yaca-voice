@@ -3,6 +3,7 @@ YacaClient = {
     towerConfig = nil,
 
     mufflingVehicleWhitelistHash = {},
+    whitelistedRoomIds = {},
     allPlayers = {},
     firstConnect = true,
 
@@ -10,7 +11,7 @@ YacaClient = {
     defaultVoiceRange = 1,
     maxVoiceRange = -1,
     rangeIndex = 1,
-    rangeInterval = nil,
+    rangeIntervalToken = 0,
     visualVoiceRangeTimeout = nil,
     visualVoiceRangeTick = nil,
     voiceRangeViaMouseWheelTick = nil,
@@ -28,6 +29,10 @@ YacaClient = {
     currentlyPhoneSpeakerApplied = {},
     currentlySendingPhoneSpeakerSender = {},
     phoneHearNearbyPlayer = {},
+    currentlyAirborneApplied = {},
+
+    disabledFilters = {},
+    teamSpeakUniqueIdentifier = nil,
 
     isFiveM = (GetGameName() == "fivem"),
     isRedM = (GetGameName() == "redm"),
@@ -89,6 +94,13 @@ local function initializeClient()
         end
     end
 
+    local whitelistRooms = YacaClient.sharedConfig.mufflingSettings.whitelistedRoomIds or {}
+    for _, roomId in ipairs(whitelistRooms) do
+        YacaClient.whitelistedRoomIds[roomId] = true
+    end
+
+    YacaClient.disabledFilters = YacaClient:parseDisabledFilters(YacaClient.sharedConfig.disabledFilters)
+
     YacaClient:setCurrentPluginState(YacaPluginStates.NOT_CONNECTED)
 
     RegisterNUICallback("YACA_OnNuiReady", function(_, cb)
@@ -103,8 +115,11 @@ local function initializeClient()
 
     YacaClient:registerExports()
     YacaClient:registerEvents()
+    YacaClient:registerStateBagCaches()
     if YacaClient.isFiveM then
         YacaClient:registerKeybindings()
+    elseif YacaClient.isRedM then
+        YacaClient:registerRdrKeybindings()
     end
 
     if not YacaClient.sharedConfig.useLocalLipSync then
@@ -176,6 +191,16 @@ function YacaClient:notification(message, notifType)
                 ThefeedSetNextPostBackgroundColor(6)
             end
             EndTextCommandThefeedPostTicker(false, false)
+        else
+            print("[YaCA] GTA notification is only available in FiveM.")
+        end
+    end
+
+    if self.sharedConfig.notifications.redm then
+        if self.isRedM then
+            YacaDisplayRdrNotification("YaCA: " .. message, 2000)
+        else
+            print("[YaCA] RedM notification is only available in RedM.")
         end
     end
 
@@ -426,6 +451,47 @@ function YacaClient:sendWebsocket(msg)
     YacaWebSocket:send(msg)
 end
 
+function YacaClient:parseDisabledFilters(filters)
+    local parsed = {}
+    if type(filters) ~= "table" then return parsed end
+
+    local known = {}
+    for _, value in pairs(YacaFilterEnum) do known[value] = true end
+    for _, value in pairs(YacaEffectFilterEnum) do known[value] = true end
+
+    for _, filter in ipairs(filters) do
+        if known[filter] then
+            parsed[#parsed + 1] = filter
+        else
+            print(("[YaCA] Unknown filter '%s' in disabledFilters, it will be ignored."):format(tostring(filter)))
+        end
+    end
+
+    return parsed
+end
+
+function YacaClient:registerStateBagCaches()
+    AddStateBagChangeHandler(YACA_STATE_VOICE_RANGE, "", function(bagName, _, value, _)
+        local playerId = GetPlayerFromStateBagName(bagName)
+        if playerId == 0 then return end
+        local serverId = GetPlayerServerId(playerId)
+        local player = self:getPlayerByID(serverId)
+        if player then
+            player.cachedVoiceRange = value
+        end
+    end)
+
+    AddStateBagChangeHandler(YACA_STATE_MEGAPHONE, "", function(bagName, _, value, _)
+        local playerId = GetPlayerFromStateBagName(bagName)
+        if playerId == 0 then return end
+        local serverId = GetPlayerServerId(playerId)
+        local player = self:getPlayerByID(serverId)
+        if player then
+            player.cachedUsesMegaphone = value ~= nil
+        end
+    end)
+end
+
 function YacaClient:initRequest(dataObj)
     if not dataObj or not dataObj.suid or type(dataObj.chid) ~= "number"
        or not dataObj.deChid or not dataObj.ingameName
@@ -447,6 +513,7 @@ function YacaClient:initRequest(dataObj)
         build_type = self.sharedConfig.buildType,
         unmute_delay = self.sharedConfig.unmuteDelay,
         operation_mode = dataObj.useWhisper and 1 or 0,
+        disabled_filters = self.disabledFilters,
     })
 
     self.useWhisper = dataObj.useWhisper or false
@@ -482,15 +549,15 @@ function YacaClient:handleResponse(payload)
     if code == "OK" then
         if parsedPayload.requestType == "JOIN" then
             local clientId = tonumber(parsedPayload.message)
-            TriggerServerEvent("server:yaca:addPlayer", clientId)
+            self.teamSpeakUniqueIdentifier = parsedPayload.additionalMessage or nil
+            TriggerServerEvent("server:yaca:addPlayer", clientId, self.teamSpeakUniqueIdentifier)
 
             self.nuiConnectRetryActive = false
 
-            self.rangeInterval = nil
-
-            self.rangeInterval = true
+            self.rangeIntervalToken = (self.rangeIntervalToken or 0) + 1
+            local token = self.rangeIntervalToken
             Citizen.CreateThread(function()
-                while self.rangeInterval do
+                while self.rangeIntervalToken == token do
                     self:calcPlayers()
                     Citizen.Wait(250)
                 end
@@ -500,7 +567,7 @@ function YacaClient:handleResponse(payload)
                 YacaRadio:initRadioSettings()
             end
 
-            TriggerEvent("yaca:external:pluginInitialized", clientId)
+            TriggerEvent("yaca:external:pluginInitialized", clientId, self.teamSpeakUniqueIdentifier)
         end
         return
 
@@ -562,6 +629,12 @@ function YacaClient:syncLipsPlayer(ped, playerId, talking)
             PlayFacialAnim(ped, "mic_chatter", "mp_facial")
         else
             PlayFacialAnim(ped, "mood_normal_1", "facials@gen_male@variations@normal")
+        end
+    elseif self.isRedM then
+        if talking then
+            YacaPlayRdrFacialAnim(ped, "mood_talking_normal", "face_human@gen_male@base")
+        else
+            YacaPlayRdrFacialAnim(ped, "mood_normal", "face_human@gen_male@base")
         end
     end
 end
@@ -675,8 +748,12 @@ end
 
 function YacaClient:getMuffleIntensity(playerPed, nearbyPlayerPed, playerVehicle, ownCurrentRoom, ownVehicleHasOpening, nearbyUsesMegaphone, vehicleOpeningCache)
     local intensities = self.sharedConfig.mufflingSettings.intensities
+    local targetRoom = GetRoomKeyFromEntity(nearbyPlayerPed)
 
-    if ownCurrentRoom ~= GetRoomKeyFromEntity(nearbyPlayerPed) and not HasEntityClearLosToEntity(playerPed, nearbyPlayerPed, 17) then
+    if ownCurrentRoom ~= targetRoom and not HasEntityClearLosToEntity(playerPed, nearbyPlayerPed, 17) then
+        if targetRoom ~= 0 and self.whitelistedRoomIds[targetRoom] then
+            return 0
+        end
         return intensities.differentRoom
     end
 
@@ -694,10 +771,9 @@ function YacaClient:getMuffleIntensity(playerPed, nearbyPlayerPed, playerVehicle
         return intensities.megaPhoneInCar
     end
 
-    local nearbyVehicleKey = nearbyPlayerVehicle > 0 and nearbyPlayerVehicle or false
     local nearbyPlayerVehicleHasOpening = vehicleOpeningCache[nearbyPlayerVehicle]
     if nearbyPlayerVehicleHasOpening == nil then
-        nearbyPlayerVehicleHasOpening = self:checkIfVehicleHasOpening(nearbyVehicleKey)
+        nearbyPlayerVehicleHasOpening = self:checkIfVehicleHasOpening(nearbyPlayerVehicle > 0 and nearbyPlayerVehicle or false)
         vehicleOpeningCache[nearbyPlayerVehicle] = nearbyPlayerVehicleHasOpening
     end
 
@@ -710,6 +786,67 @@ function YacaClient:getMuffleIntensity(playerPed, nearbyPlayerPed, playerVehicle
     end
 
     return 0
+end
+
+function YacaClient:getRoomPair(ped, isolatedFromRoom)
+    if not self.isFiveM or isolatedFromRoom then
+        return YacaOutsideRoomPair
+    end
+    return YacaGetInteriorRoomPair(ped)
+end
+
+function YacaClient:isAirborneVehicle(vehicle)
+    if not self.sharedConfig.airborne or not self.sharedConfig.airborne.enabled or not self.isFiveM or not vehicle then
+        return false
+    end
+
+    local vehicleClass = GetVehicleClass(vehicle)
+    for _, cls in ipairs(self.sharedConfig.airborne.vehicleClasses or {}) do
+        if cls == vehicleClass then
+            return true
+        end
+    end
+    return false
+end
+
+function YacaClient:handleAirborneEmit(crewMembers)
+    for playerId in pairs(self.currentlyAirborneApplied) do
+        if not crewMembers[playerId] then
+            self.currentlyAirborneApplied[playerId] = nil
+            local player = self:getPlayerByID(playerId)
+            if player then
+                self:setPlayersCommType(
+                    player, YacaFilterEnum.AIRBORNE, false,
+                    nil, nil, CommDeviceMode.TRANSCEIVER, CommDeviceMode.TRANSCEIVER
+                )
+            end
+        end
+    end
+
+    for playerId in pairs(crewMembers) do
+        if not self.currentlyAirborneApplied[playerId] then
+            local player = self:getPlayerByID(playerId)
+            if player then
+                self:setPlayersCommType(
+                    player, YacaFilterEnum.AIRBORNE, true,
+                    nil, nil, CommDeviceMode.TRANSCEIVER, CommDeviceMode.TRANSCEIVER
+                )
+                self.currentlyAirborneApplied[playerId] = true
+            end
+        end
+    end
+end
+
+function YacaClient:setPlayerVolumeModifier(serverId, volumeModifier)
+    local player = self:getPlayerByID(serverId)
+    if not player then return end
+
+    if type(volumeModifier) ~= "number" then
+        print(("[YaCA] Invalid volume modifier for player %s: %s"):format(tostring(serverId), tostring(volumeModifier)))
+        return
+    end
+
+    player.volumeModifier = YacaClamp(volumeModifier, 0.1, 2)
 end
 
 function YacaClient:handlePhoneSpeakerEmit(playersToPhoneSpeaker, playersOnPhoneSpeaker)
@@ -798,11 +935,12 @@ function YacaClient:calcPlayers()
     if not localData then return end
 
     local playersList = {}
-    local playersSeenSet = {}
+    local playersByRemoteId = {}
     local playersToPhoneSpeaker = {}
     local playersOnPhoneSpeaker = {}
     local playerToHearOnPhone = {}
     local vehicleOpeningCache = {}
+    local airborneCrewMembers = {}
 
     local localPlayerPed = YacaCache.ped
     local localPlayerVehicle = YacaCache.vehicle
@@ -821,6 +959,7 @@ function YacaClient:calcPlayers()
 
     local localPos = GetEntityCoords(localPlayerPed, false)
     local currentRoom = GetRoomKeyFromEntity(localPlayerPed)
+    local localRoomPair = self:getRoomPair(localPlayerPed, localPlayerVehicle and true or false)
     local hasVehicleOpening = self.isFiveM and self:checkIfVehicleHasOpening(localPlayerVehicle) or true
     local phoneSpeakerActive = YacaPhone and YacaPhone.phoneSpeakerActive and next(YacaPhone.inCallWith) ~= nil
     local phoneHearNearby = self.sharedConfig.phoneHearPlayersNearby
@@ -828,6 +967,7 @@ function YacaClient:calcPlayers()
     local serverId = YacaCache.serverId
     local defaultVoiceRange = self.defaultVoiceRange
     local useWhisper = self.useWhisper
+    local localVehicleIsAirborne = self:isAirborneVehicle(localPlayerVehicle)
 
     local activePlayers = GetActivePlayers()
     for _, player in ipairs(activePlayers) do
@@ -836,13 +976,22 @@ function YacaClient:calcPlayers()
         if remoteId ~= 0 and remoteId ~= serverId and playerPed > 0 then
             local voiceSetting = allPlayers[remoteId]
             if voiceSetting and voiceSetting.clientId then
-                local playerState = Player(remoteId).state
-                local range = playerState[YACA_STATE_VOICE_RANGE] or defaultVoiceRange
+                local range = voiceSetting.cachedVoiceRange
+                if range == nil then
+                    range = Player(remoteId).state[YACA_STATE_VOICE_RANGE] or defaultVoiceRange
+                    voiceSetting.cachedVoiceRange = range
+                end
+
+                local usesMegaphone = voiceSetting.cachedUsesMegaphone
+                if usesMegaphone == nil then
+                    usesMegaphone = Player(remoteId).state[YACA_STATE_MEGAPHONE] ~= nil
+                    voiceSetting.cachedUsesMegaphone = usesMegaphone
+                end
 
                 local muffleIntensity = self:getMuffleIntensity(
                     localPlayerPed, playerPed, localPlayerVehicle,
                     currentRoom, hasVehicleOpening,
-                    playerState[YACA_STATE_MEGAPHONE] ~= nil,
+                    usesMegaphone,
                     vehicleOpeningCache
                 )
 
@@ -850,6 +999,13 @@ function YacaClient:calcPlayers()
                 local distanceToPlayer = #(localPos - playerPos)
                 local playerDirection = GetEntityForwardVector(playerPed)
                 local isUnderwater = IsPedSwimmingUnderWater(playerPed)
+                local playerVehicle = GetVehiclePedIsIn(playerPed, false)
+                local sharesLocalVehicle = localPlayerVehicle and playerVehicle == localPlayerVehicle
+                local playerRoomPair = self:getRoomPair(playerPed, sharesLocalVehicle)
+
+                if localVehicleIsAirborne and sharesLocalVehicle then
+                    airborneCrewMembers[remoteId] = true
+                end
 
                 if not playersOnPhoneSpeaker[remoteId] then
                     local entry = {
@@ -861,8 +1017,15 @@ function YacaClient:calcPlayers()
                         muffle_intensity = muffleIntensity,
                         is_muted = voiceSetting.forceMuted or false,
                     }
+                    if type(voiceSetting.volumeModifier) == "number" then
+                        entry.volume_modifier = voiceSetting.volumeModifier
+                    end
+                    if playerRoomPair.interiorKey ~= 0 and playerRoomPair.roomKey ~= 0 then
+                        entry.interior_key = playerRoomPair.interiorKey
+                        entry.room_key = playerRoomPair.roomKey
+                    end
                     playersList[#playersList + 1] = entry
-                    playersSeenSet[remoteId] = true
+                    playersByRemoteId[remoteId] = #playersList
                 end
 
                 if phoneHearNearby and not localData.mutedOnPhone and not voiceSetting.forceMuted and distanceToPlayer <= range then
@@ -884,32 +1047,29 @@ function YacaClient:calcPlayers()
                         for _, phoneCallMemberId in ipairs(voiceSetting.phoneCallMemberIds) do
                             local phoneCallMember = allPlayers[phoneCallMemberId]
                             if phoneCallMember and phoneCallMember.clientId and not phoneCallMember.mutedOnPhone and not phoneCallMember.forceMuted then
-                                if playersSeenSet[phoneCallMemberId] then
-                                    for i = 1, #playersList do
-                                        if playersList[i].client_id == phoneCallMember.clientId then
-                                            playersList[i] = {
-                                                client_id = phoneCallMember.clientId,
-                                                position = posXYZ,
-                                                direction = dirXYZ,
-                                                range = maxPhoneSpeakerRange,
-                                                is_underwater = isUnderwater,
-                                                muffle_intensity = muffleIntensity,
-                                                is_muted = false,
-                                            }
-                                            break
-                                        end
-                                    end
+                                local speakerEntry = {
+                                    client_id = phoneCallMember.clientId,
+                                    position = posXYZ,
+                                    direction = dirXYZ,
+                                    range = maxPhoneSpeakerRange,
+                                    is_underwater = isUnderwater,
+                                    muffle_intensity = muffleIntensity,
+                                    is_muted = false,
+                                }
+                                if type(phoneCallMember.volumeModifier) == "number" then
+                                    speakerEntry.volume_modifier = phoneCallMember.volumeModifier
+                                end
+                                if playerRoomPair.interiorKey ~= 0 and playerRoomPair.roomKey ~= 0 then
+                                    speakerEntry.interior_key = playerRoomPair.interiorKey
+                                    speakerEntry.room_key = playerRoomPair.roomKey
+                                end
+
+                                local existingIndex = playersByRemoteId[phoneCallMemberId]
+                                if existingIndex then
+                                    playersList[existingIndex] = speakerEntry
                                 else
-                                    playersList[#playersList + 1] = {
-                                        client_id = phoneCallMember.clientId,
-                                        position = posXYZ,
-                                        direction = dirXYZ,
-                                        range = maxPhoneSpeakerRange,
-                                        is_underwater = isUnderwater,
-                                        muffle_intensity = muffleIntensity,
-                                        is_muted = false,
-                                    }
-                                    playersSeenSet[phoneCallMemberId] = true
+                                    playersList[#playersList + 1] = speakerEntry
+                                    playersByRemoteId[phoneCallMemberId] = #playersList
                                 end
 
                                 playersOnPhoneSpeaker[phoneCallMemberId] = true
@@ -932,17 +1092,26 @@ function YacaClient:calcPlayers()
 
     self:handlePhoneSpeakerEmit(playersToPhoneSpeaker, playersOnPhoneSpeaker)
     self:handlePhoneEmit(playerToHearOnPhone)
+    self:handleAirborneEmit(airborneCrewMembers)
+
+    local playerPayload = {
+        player_direction = YacaGetCamDirection(),
+        player_position = YacaConvertToXYZ(localPos),
+        player_range = LocalPlayer.state[YACA_STATE_VOICE_RANGE] or defaultVoiceRange,
+        player_is_underwater = IsPedSwimmingUnderWater(localPlayerPed),
+        player_is_muted = localData.forceMuted or false,
+        players_list = playersList,
+    }
+    if localRoomPair.roomKey ~= 0 then
+        playerPayload.room_key = localRoomPair.roomKey
+    end
+    if localRoomPair.interiorKey ~= 0 then
+        playerPayload.interior_key = localRoomPair.interiorKey
+    end
 
     self:sendWebsocket({
         base = { request_type = "INGAME" },
-        player = {
-            player_direction = YacaGetCamDirection(),
-            player_position = YacaConvertToXYZ(localPos),
-            player_range = LocalPlayer.state[YACA_STATE_VOICE_RANGE] or defaultVoiceRange,
-            player_is_underwater = IsPedSwimmingUnderWater(localPlayerPed),
-            player_is_muted = localData.forceMuted or false,
-            players_list = playersList,
-        },
+        player = playerPayload,
     })
 end
 
@@ -983,6 +1152,40 @@ function YacaClient:registerKeybindings()
     end
 end
 
+function YacaClient:registerRdrKeybindings()
+    local kb = self.sharedConfig.keyBinds
+
+    if kb.increaseVoiceRange and kb.increaseVoiceRange ~= false then
+        YacaRegisterRdrKeyBind(kb.increaseVoiceRange, function()
+            self:changeVoiceRange(true)
+        end)
+    end
+
+    if kb.decreaseVoiceRange and kb.decreaseVoiceRange ~= false then
+        YacaRegisterRdrKeyBind(kb.decreaseVoiceRange, function()
+            self:changeVoiceRange(false)
+        end)
+    end
+
+    if kb.voiceRangeWithMouseWheel and kb.voiceRangeWithMouseWheel ~= false then
+        YacaRegisterRdrKeyBind(
+            kb.voiceRangeWithMouseWheel,
+            function()
+                self.voiceRangeViaMouseWheelTick = true
+                Citizen.CreateThread(function()
+                    while self.voiceRangeViaMouseWheelTick do
+                        self:handleVoiceRangeViaMouseWheel()
+                        Citizen.Wait(0)
+                    end
+                end)
+            end,
+            function()
+                self.voiceRangeViaMouseWheelTick = nil
+            end
+        )
+    end
+end
+
 function YacaClient:registerExports()
     exports("isEnabled", function() return GetConvarBool("yaca_enabled", true) end)
     exports("getVoiceRange", function(serverId) return self:getVoiceRange(serverId) end)
@@ -1002,6 +1205,14 @@ function YacaClient:registerExports()
     exports("getSoundMuteState", function() return self.isSoundMuted end)
     exports("getSoundDisabledState", function() return self.isSoundDisabled end)
     exports("getPluginState", function() return self.currentPluginState or YacaPluginStates.NOT_CONNECTED end)
+    exports("getTeamSpeakUniqueIdentifier", function() return self.teamSpeakUniqueIdentifier end)
+    exports("setPlayerVolumeModifier", function(serverId, volumeModifier)
+        self:setPlayerVolumeModifier(serverId, volumeModifier)
+    end)
+    exports("getPlayerVolumeModifier", function(serverId)
+        local player = self:getPlayerByID(serverId)
+        return (player and player.volumeModifier) or 1
+    end)
     exports("getGlobalErrorLevel", function() return GlobalState[YACA_STATE_GLOBAL_ERROR_LEVEL] or 0 end)
     exports("setSpectatingPlayer", function(player) self.spectatingPlayer = player end)
     exports("getSpectatingPlayer", function() return self.spectatingPlayer end)
@@ -1094,9 +1305,7 @@ function YacaClient:registerEvents()
     end)
 
     RegisterNetEvent("client:yaca:init", function(dataObj)
-        if self.rangeInterval then
-            self.rangeInterval = nil
-        end
+        self.rangeIntervalToken = (self.rangeIntervalToken or 0) + 1
 
         if not YacaWebSocket.initialized then
             YacaWebSocket.initialized = true
@@ -1136,6 +1345,7 @@ function YacaClient:registerEvents()
         if YacaPhone then
             YacaPhone:handleDisconnect(remoteId)
         end
+        self.currentlyAirborneApplied[remoteId] = nil
         self.allPlayers[remoteId] = nil
     end)
 
@@ -1149,6 +1359,7 @@ function YacaClient:registerEvents()
         for _, dataObj in ipairs(dataObjects) do
             if dataObj and dataObj.clientId ~= nil and dataObj.playerId ~= nil then
                 local currentData = self:getPlayerByID(dataObj.playerId)
+                local playerState = Player(dataObj.playerId).state
                 self.allPlayers[dataObj.playerId] = {
                     remoteID = dataObj.playerId,
                     clientId = dataObj.clientId,
@@ -1156,6 +1367,10 @@ function YacaClient:registerEvents()
                     phoneCallMemberIds = currentData and currentData.phoneCallMemberIds or nil,
                     mutedOnPhone = dataObj.mutedOnPhone or false,
                     isTalking = currentData and currentData.isTalking or false,
+                    volumeModifier = dataObj.volumeModifier ~= nil and dataObj.volumeModifier or (currentData and currentData.volumeModifier) or nil,
+                    cachedVoiceRange = playerState[YACA_STATE_VOICE_RANGE] or self.defaultVoiceRange,
+                    cachedUsesMegaphone = playerState[YACA_STATE_MEGAPHONE] ~= nil,
+                    radioProp = currentData and currentData.radioProp or nil,
                 }
                 newPlayers[#newPlayers + 1] = dataObj.playerId
             end
@@ -1170,6 +1385,10 @@ function YacaClient:registerEvents()
         local player = self:getPlayerByID(target)
         if not player then return end
         player.forceMuted = muted
+    end)
+
+    RegisterNetEvent("client:yaca:setPlayerVolumeModifier", function(target, volumeModifier)
+        self:setPlayerVolumeModifier(target, volumeModifier)
     end)
 
     RegisterNetEvent("client:yaca:changeVoiceRange", function(range)

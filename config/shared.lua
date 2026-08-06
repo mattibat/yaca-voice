@@ -57,6 +57,8 @@ YacaSharedConfig = {
             flag = 49,
         },
         propWhileTalking = {
+            -- How the prop is created: "stateBag" syncs via state bags, "client" only locally.
+            createMode = "stateBag", -- "stateBag" | "client"
             -- The prop that should be shown while talking on the radio.
             prop = false,
             -- The bone that the prop should be attached to.
@@ -77,6 +79,13 @@ YacaSharedConfig = {
         mode = "None", -- "None" | "Direct" | "Tower"
         -- The maximum distance between two players or to the tower to be able to hear each other.
         maxDistance = 1000,
+    },
+
+    airborne = {
+        -- Enable the airborne voice filter for crew in the same aircraft. (FiveM only)
+        enabled = false,
+        -- Vehicle classes that count as aircraft (15 = Helicopters, 16 = Planes).
+        vehicleClasses = { 15, 16 },
     },
 
     voiceRange = {
@@ -119,6 +128,8 @@ YacaSharedConfig = {
     mufflingSettings = {
         -- If set to -1, the player voice range is used, all values >= 0 sets the muffling range before it gets completely cut off
         mufflingRange = -1,
+        -- Room IDs that should not apply different-room muffling when LOS is blocked.
+        whitelistedRoomIds = {},
         vehicleMuffling = {
             -- If set to true, the vehicle muffling feature is enabled. (FiveM only)
             enabled = true,
@@ -146,4 +157,7 @@ YacaSharedConfig = {
     radioAntiSpamCooldown = false, -- false or number (ms)
     -- When set to true the plugin syncs the talk state via the plugin, instead of the default way via statebags. This imitates the way how saltychat syncs the talk state, but has some drawbacks.
     useLocalLipSync = true,
+    -- Filters/effects disabled for the plugin INIT (devices keep working without coloring).
+    -- Valid: RADIO, PHONE, PHONE_SPEAKER, PHONE_HISTORICAL, MEGAPHONE, INTERCOM, AIRBORNE, MUFFLE, WATER, ECHO, REVERB
+    disabledFilters = {},
 }

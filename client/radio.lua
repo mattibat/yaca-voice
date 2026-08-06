@@ -30,84 +30,59 @@ local function initRadioModule()
 
     YacaRadio:registerExports()
     YacaRadio:registerEvents()
+    YacaRadio:registerStateBagHandlers()
 
     if YacaClient.isFiveM then
         YacaRadio:registerKeybinds()
+    elseif YacaClient.isRedM then
+        YacaRadio:registerRdrKeybinds()
     end
+end
 
-    Citizen.CreateThread(function()
-        while true do
-            Citizen.Wait(200)
-            YacaRadio:syncTalkingVisualState()
+function YacaRadio:registerStateBagHandlers()
+    AddStateBagChangeHandler(YACA_STATE_RADIO_PROP, "", function(bagName, _, value, _, replicated)
+        if replicated then return end
+
+        local playerId = GetPlayerFromStateBagName(bagName)
+        if playerId == 0 then return end
+
+        local playerSource = GetPlayerServerId(playerId)
+        if playerSource == 0 then return end
+
+        local player = YacaClient:getPlayerByID(playerSource)
+        if not player then return end
+
+        local propCfg = YacaClient.sharedConfig.radioSettings.propWhileTalking
+        if value then
+            if propCfg and propCfg.prop ~= false then
+                player.radioProp = YacaCreateProp(
+                    GetPlayerPed(playerId),
+                    propCfg.prop,
+                    propCfg.boneId,
+                    propCfg.position,
+                    propCfg.rotation,
+                    false
+                )
+            end
+        else
+            self:removeRadioProp(player)
         end
     end)
 end
 
-local function isAnyRadioChannelTalking(talkingInChannels)
-    for _, isTalking in pairs(talkingInChannels) do
-        if isTalking then
-            return true
-        end
+function YacaRadio:removeRadioProp(player)
+    if not player or not player.radioProp then return end
+
+    if DoesEntityExist(player.radioProp) then
+        DeleteEntity(player.radioProp)
     end
 
-    return false
-end
-
-function YacaRadio:syncTalkingVisualState()
-    if not YacaClient or not YacaClient.sharedConfig then return end
-
-    local shouldVisualizeTalking = isAnyRadioChannelTalking(self.talkingInChannels)
-    local ped = YacaCache and YacaCache.ped or PlayerPedId()
-
-    local animCfg = YacaClient.sharedConfig.radioSettings and YacaClient.sharedConfig.radioSettings.animation
-    if animCfg and animCfg.dictionary and animCfg.name then
-        local isPlaying = IsEntityPlayingAnim(ped, animCfg.dictionary, animCfg.name, 3)
-
-        if shouldVisualizeTalking then
-            if not isPlaying and YacaRequestAnimDict(animCfg.dictionary, 1500) then
-                TaskPlayAnim(
-                    ped,
-                    animCfg.dictionary,
-                    animCfg.name,
-                    3, -4, -1,
-                    animCfg.flag,
-                    0.0,
-                    false, false, false
-                )
-            end
-        else
-            if isPlaying then
-                StopAnimTask(ped, animCfg.dictionary, animCfg.name, 4)
-            end
-
-            RemoveAnimDict(animCfg.dictionary)
-        end
+    local propCfg = YacaClient.sharedConfig.radioSettings.propWhileTalking
+    if propCfg and propCfg.prop ~= false then
+        SetModelAsNoLongerNeeded(propCfg.prop)
     end
 
-    local propCfg = YacaClient.sharedConfig.radioSettings and YacaClient.sharedConfig.radioSettings.propWhileTalking
-    if not propCfg or propCfg.prop == false then
-        if self.currentRadioProp and DoesEntityExist(self.currentRadioProp) then
-            DeleteEntity(self.currentRadioProp)
-        end
-        self.currentRadioProp = nil
-        return
-    end
-
-    local hasProp = self.currentRadioProp and DoesEntityExist(self.currentRadioProp)
-
-    if shouldVisualizeTalking then
-        if not hasProp then
-            self.currentRadioProp = YacaCreateProp(propCfg.prop, propCfg.boneId, propCfg.position, propCfg.rotation)
-        end
-        return
-    end
-
-    if hasProp then
-        DeleteEntity(self.currentRadioProp)
-    end
-
-    SetModelAsNoLongerNeeded(propCfg.prop)
-    self.currentRadioProp = nil
+    player.radioProp = nil
 end
 
 function YacaRadio:registerExports()
@@ -135,13 +110,23 @@ function YacaRadio:registerExports()
 end
 
 function YacaRadio:registerEvents()
+    RegisterNetEvent("onPlayerDropped", function(target)
+        local propCfg = YacaClient.sharedConfig.radioSettings.propWhileTalking
+        if not propCfg or propCfg.createMode ~= "stateBag" then return end
+
+        local player = YacaClient:getPlayerByID(target)
+        if player then
+            self:removeRadioProp(player)
+        end
+    end)
+
     RegisterNetEvent("client:yaca:setRadioFreq", function(channel, frequency)
         self:setRadioFrequency(channel, frequency)
     end)
 
     RegisterNetEvent("client:yaca:radioTalking", function(target, frequency, state, infos, senderDistanceToTower, senderPosition)
         senderDistanceToTower = senderDistanceToTower or -1
-        senderPosition = senderPosition or {0, 0, 0}
+        senderPosition = senderPosition or { 0, 0, 0 }
 
         local channel = self:findRadioChannelByFrequency(frequency)
         if not channel then return end
@@ -149,30 +134,33 @@ function YacaRadio:registerEvents()
         local ownDistanceToTowerOrSender = self:getDistanceToTowerOrSender(senderPosition)
 
         if state then
-            if self.radioMode ~= "None" and ownDistanceToTowerOrSender > YacaClient.sharedConfig.radioSettings.maxDistance then return end
-            if self.radioMode == "Tower" and senderDistanceToTower > YacaClient.sharedConfig.radioSettings.maxDistance then return end
+            if self.radioMode ~= "None" and ownDistanceToTowerOrSender > YacaClient.sharedConfig.radioSettings.maxDistance then
+                return
+            end
+            if self.radioMode == "Tower" and senderDistanceToTower > YacaClient.sharedConfig.radioSettings.maxDistance then
+                return
+            end
         end
 
         local player = YacaClient:getPlayerByID(target)
         if not player then return end
 
-        local info = infos and infos[tostring(YacaCache.serverId)] or nil
+        local info = infos and (infos[tostring(YacaCache.serverId)] or infos[YacaCache.serverId])
 
         if not info or not info.shortRange or (info.shortRange and GetPlayerFromServerId(target) ~= -1) then
             local errorLevel = self:getErrorLevelFromDistance(ownDistanceToTowerOrSender, senderDistanceToTower)
-
             YacaClient:setPlayersCommType(
                 player, YacaFilterEnum.RADIO, state, channel,
                 nil, CommDeviceMode.RECEIVER, CommDeviceMode.SENDER, errorLevel
             )
         end
 
-        if state then
-            if not self.playersInRadioChannel[channel] then
-                self.playersInRadioChannel[channel] = {}
-            end
-            self.playersInRadioChannel[channel][target] = true
+        if not self.playersInRadioChannel[channel] then
+            self.playersInRadioChannel[channel] = {}
+        end
 
+        if state then
+            self.playersInRadioChannel[channel][target] = true
             if info and info.shortRange then
                 self.playersWithShortRange[target] = frequency
             end
@@ -182,21 +170,16 @@ function YacaRadio:registerEvents()
                 YacaSaltyChatBridge:handleRadioReceivingStateChange(true, channel)
             end
         else
-            if self.playersInRadioChannel[channel] then
-                self.playersInRadioChannel[channel][target] = nil
-            end
-
+            self.playersInRadioChannel[channel][target] = nil
             if info and info.shortRange then
                 self.playersWithShortRange[target] = nil
             end
 
-            local inRadio = 0
-            if self.playersInRadioChannel[channel] then
-                for _ in pairs(self.playersInRadioChannel[channel]) do
-                    inRadio = inRadio + 1
-                end
+            local count = 0
+            for _ in pairs(self.playersInRadioChannel[channel]) do
+                count = count + 1
             end
-            local receiveState = inRadio > 0
+            local receiveState = count > 0
             TriggerEvent("yaca:external:isRadioReceiving", receiveState, channel, target)
             if YacaSaltyChatBridge then
                 YacaSaltyChatBridge:handleRadioReceivingStateChange(receiveState, channel)
@@ -205,7 +188,7 @@ function YacaRadio:registerEvents()
     end)
 
     RegisterNetEvent("client:yaca:radioTalkingWhisper", function(targets, frequency, state, senderPosition)
-        senderPosition = senderPosition or {0, 0, 0}
+        senderPosition = senderPosition or { 0, 0, 0 }
 
         local channel = self:findRadioChannelByFrequency(frequency)
         if not channel then return end
@@ -252,7 +235,7 @@ function YacaRadio:registerEvents()
             self:setRadioFrequency(channel, "0")
             self.talkingInChannels[channel] = nil
             self.radioTowerCalculation[channel] = nil
-            self:syncTalkingVisualState()
+            self:stopTalkingVisuals(channel)
         end
 
         YacaClient:sendWebsocket({
@@ -288,6 +271,24 @@ function YacaRadio:registerKeybinds()
     end
 end
 
+function YacaRadio:registerRdrKeybinds()
+    if YacaClient.sharedConfig.keyBinds.primaryRadioTransmit and YacaClient.sharedConfig.keyBinds.primaryRadioTransmit ~= false then
+        YacaRegisterRdrKeyBind(
+            YacaClient.sharedConfig.keyBinds.primaryRadioTransmit,
+            function() self:radioTalkingStart(true, self.activeRadioChannel) end,
+            function() self:radioTalkingStart(false, self.activeRadioChannel) end
+        )
+    end
+
+    if YacaClient.sharedConfig.keyBinds.secondaryRadioTransmit and YacaClient.sharedConfig.keyBinds.secondaryRadioTransmit ~= false then
+        YacaRegisterRdrKeyBind(
+            YacaClient.sharedConfig.keyBinds.secondaryRadioTransmit,
+            function() self:radioTalkingStart(true, self.secondaryRadioChannel) end,
+            function() self:radioTalkingStart(false, self.secondaryRadioChannel) end
+        )
+    end
+end
+
 function YacaRadio:getErrorLevelFromDistance(ownDistanceToTower, senderDistanceToTower)
     local globalErrorLevel = GlobalState[YACA_STATE_GLOBAL_ERROR_LEVEL] or 0
 
@@ -310,7 +311,9 @@ function YacaRadio:getDistanceToTowerOrSender(senderPosition)
         ownDistance = self:getNearestRadioTower()
     elseif self.radioMode == "Direct" then
         local pedPos = GetEntityCoords(YacaCache.ped, false)
-        local sx, sy, sz = senderPosition.x or senderPosition[1] or 0, senderPosition.y or senderPosition[2] or 0, senderPosition.z or senderPosition[3] or 0
+        local sx = senderPosition.x or senderPosition[1] or 0
+        local sy = senderPosition.y or senderPosition[2] or 0
+        local sz = senderPosition.z or senderPosition[3] or 0
         ownDistance = #(pedPos - vector3(sx, sy, sz))
     end
 
@@ -400,11 +403,9 @@ end
 
 function YacaRadio:setActiveRadioChannel(channel)
     if not YacaClient:isPluginInitialized() or not self.radioEnabled then return false end
-
-    TriggerEvent("yaca:external:changedActiveRadioChannel", channel)
     self.activeRadioChannel = channel
-    self:updateRadioChannelData(self.activeRadioChannel)
-
+    self:updateRadioChannelData(channel)
+    TriggerEvent("yaca:external:changedActiveRadioChannel", channel)
     return true
 end
 
@@ -606,9 +607,79 @@ function YacaRadio:disableRadioFromPlayerInChannel(channel)
     end
 end
 
+function YacaRadio:anyChannelTalking()
+    for _, talking in pairs(self.talkingInChannels) do
+        if talking then return true end
+    end
+    return false
+end
+
+function YacaRadio:startTalkingVisuals()
+    local animCfg = YacaClient.sharedConfig.radioSettings.animation
+    if animCfg and animCfg.dictionary and animCfg.name then
+        if YacaRequestAnimDict(animCfg.dictionary, 1500) then
+            TaskPlayAnim(
+                YacaCache.ped,
+                animCfg.dictionary,
+                animCfg.name,
+                3, -4, -1,
+                animCfg.flag,
+                0.0,
+                false, false, false
+            )
+        end
+    end
+
+    local propCfg = YacaClient.sharedConfig.radioSettings.propWhileTalking
+    if not propCfg or propCfg.prop == false then return end
+
+    local createMode = propCfg.createMode or "stateBag"
+    if createMode == "stateBag" then
+        LocalPlayer.state:set(YACA_STATE_RADIO_PROP, true, true)
+    elseif createMode == "client" then
+        if not self.currentRadioProp then
+            self.currentRadioProp = YacaCreateProp(
+                YacaCache.ped,
+                propCfg.prop,
+                propCfg.boneId,
+                propCfg.position,
+                propCfg.rotation,
+                true
+            )
+        end
+    end
+end
+
+function YacaRadio:stopTalkingVisuals(_channel)
+    if self:anyChannelTalking() then return end
+
+    local animCfg = YacaClient.sharedConfig.radioSettings.animation
+    if animCfg and animCfg.dictionary and animCfg.name then
+        StopAnimTask(YacaCache.ped, animCfg.dictionary, animCfg.name, 4)
+        RemoveAnimDict(animCfg.dictionary)
+    end
+
+    local propCfg = YacaClient.sharedConfig.radioSettings.propWhileTalking
+    if not propCfg then return end
+
+    local createMode = propCfg.createMode or "stateBag"
+    if createMode == "stateBag" then
+        LocalPlayer.state:set(YACA_STATE_RADIO_PROP, false, true)
+    elseif createMode == "client" then
+        if self.currentRadioProp then
+            if DoesEntityExist(self.currentRadioProp) then
+                DeleteEntity(self.currentRadioProp)
+            end
+            if propCfg.prop ~= false then
+                SetModelAsNoLongerNeeded(propCfg.prop)
+            end
+            self.currentRadioProp = nil
+        end
+    end
+end
+
 function YacaRadio:radioTalkingStart(state, channel)
     state = (state == true)
-
     channel = tonumber(channel) or channel
 
     if type(channel) ~= "number" then return end
@@ -629,10 +700,9 @@ function YacaRadio:radioTalkingStart(state, channel)
 
             TriggerServerEvent("server:yaca:radioTalking", false, channel, -1)
             TriggerEvent("yaca:external:isRadioTalking", false, channel)
+
+            self:stopTalkingVisuals(channel)
         end
-
-        self:syncTalkingVisualState()
-
         return
     end
 
@@ -654,7 +724,7 @@ function YacaRadio:radioTalkingStart(state, channel)
         self:radioTalkingStateToPlugin(true, channel)
     end
 
-    self:syncTalkingVisualState()
+    self:startTalkingVisuals()
 
     if YacaSaltyChatBridge then
         YacaSaltyChatBridge:handleRadioTalkingStateChange(true, channel)

@@ -114,6 +114,40 @@ function YacaVehicleHasOpening(vehicle)
     return false
 end
 
+YacaOutsideRoomPair = { interiorKey = 0, roomKey = 0 }
+
+---@param value number
+---@return number
+function YacaToUInt32(value)
+    return value & 0xFFFFFFFF
+end
+
+---@param entity number
+---@return table
+function YacaGetInteriorRoomPair(entity)
+    local ok, pair = pcall(function()
+        local interior = GetInteriorFromEntity(entity)
+        if not interior or interior == 0 then
+            return YacaOutsideRoomPair
+        end
+
+        local _, interiorNameHash = GetInteriorLocationAndNamehash(interior)
+        local interiorKey = YacaToUInt32(interiorNameHash or 0)
+        local roomKey = YacaToUInt32(GetRoomKeyFromEntity(entity) or 0)
+
+        if interiorKey == 0 or roomKey == 0 then
+            return YacaOutsideRoomPair
+        end
+
+        return { interiorKey = interiorKey, roomKey = roomKey }
+    end)
+
+    if not ok or not pair then
+        return YacaOutsideRoomPair
+    end
+    return pair
+end
+
 ---@param animDict string
 ---@param timeout number|nil
 ---@return boolean
@@ -137,7 +171,7 @@ end
 
 ---@param modelName string|number
 ---@param timeout number|nil
----@return number|nil The
+---@return number|nil
 function YacaRequestModel(modelName, timeout)
     local modelHash = modelName
     if type(modelName) == "string" then
@@ -164,29 +198,106 @@ function YacaRequestModel(modelName, timeout)
     return nil
 end
 
+---@param targetPed number
 ---@param model string|number
 ---@param boneId number
----@param offset table
----@param rotation table
----@return number|nil The
-function YacaCreateProp(model, boneId, offset, rotation)
+---@param offset table|nil
+---@param rotation table|nil
+---@param networked boolean|nil
+---@return number|nil
+function YacaCreateProp(targetPed, model, boneId, offset, rotation, networked)
+    if networked == nil then networked = true end
     offset = offset or { 0.0, 0.0, 0.0 }
     rotation = rotation or { 0.0, 0.0, 0.0 }
+
+    if not targetPed or not DoesEntityExist(targetPed) then
+        return nil
+    end
 
     local modelHash = YacaRequestModel(model)
     if not modelHash then return nil end
 
-    local coords = GetEntityCoords(YacaCache.ped, true)
-    local obj = CreateObject(modelHash, coords.x, coords.y, coords.z, true, true, false)
+    local coords = GetEntityCoords(targetPed, true)
+    local obj = CreateObject(modelHash, coords.x, coords.y, coords.z, networked == true, true, false)
     SetEntityCollision(obj, false, false)
     AttachEntityToEntity(
-        obj, YacaCache.ped,
-        GetPedBoneIndex(YacaCache.ped, boneId),
-        offset[1], offset[2], offset[3],
-        rotation[1], rotation[2], rotation[3],
+        obj, targetPed,
+        GetPedBoneIndex(targetPed, boneId),
+        offset[1] or offset.x or 0.0,
+        offset[2] or offset.y or 0.0,
+        offset[3] or offset.z or 0.0,
+        rotation[1] or rotation.x or 0.0,
+        rotation[2] or rotation.y or 0.0,
+        rotation[3] or rotation.z or 0.0,
         true, false, false, true, 2, true
     )
 
     SetModelAsNoLongerNeeded(modelHash)
     return obj
+end
+
+YacaRedmKeyToHash = {
+    A = 0x7065027d, B = 0x4cc0e2fe, C = 0x9959a6f0, D = 0xb4e465b4,
+    E = 0xcefd9220, F = 0xb2f377e8, G = 0x760a9c6f, H = 0x24978a28,
+    I = 0xc1989f95, J = 0xf3830d8e, L = 0x80f28e95, M = 0xe31c6a41,
+    N = 0x4bc9dabb, O = 0xf1301666, P = 0xd82e0bd2, Q = 0xde794e3e,
+    R = 0xe30cd707, S = 0xd27782e3, U = 0xd8f73058, V = 0x7f8d09b8,
+    W = 0x8fd015d8, X = 0x8cc9cd42, Z = 0x26e9dc00,
+    RIGHTBRACKET = 0xa5bdcd3c, LEFTBRACKET = 0x430593aa,
+    MOUSE1 = 0x07ce1e61, MOUSE2 = 0xf84fa74f, MOUSE3 = 0xcee12b50, MWUP = 0x3076e97c,
+    CTRL = 0xdb096b85, LCONTROL = 0xdb096b85, TAB = 0xb238fe0b, SHIFT = 0x8ffc75d6,
+    SPACEBAR = 0xd9d0e1c0, ENTER = 0xc7b5340a, BACKSPACE = 0x156f7119,
+    LALT = 0x8aaa0ad4, DEL = 0x4af4d473, PGUP = 0x446258b6, PGDN = 0x3c3dd371,
+    F1 = 0xa8e3f467, F4 = 0x1f6d95e5, F6 = 0x3c0a40f2,
+    ["1"] = 0xe6f612e4, ["2"] = 0x1ce6d9eb, ["3"] = 0x4f49cc4c, ["4"] = 0x8f9f9e58,
+    ["5"] = 0xab62e997, ["6"] = 0xa1fde2a6, ["7"] = 0xb03a913b, ["8"] = 0x42385422,
+    DOWN = 0x05ca7c52, UP = 0x6319db71, LEFT = 0xa65ebab4, RIGHT = 0xdeb34313,
+}
+
+---@param key string
+---@param onPressed function|nil
+---@param onReleased function|nil
+function YacaRegisterRdrKeyBind(key, onPressed, onReleased)
+    if not key or key == false then return end
+
+    local keyHash = YacaRedmKeyToHash[string.upper(tostring(key))]
+    if not keyHash then
+        print(("[YaCA] No key hash available for %s, please choose another keybind"):format(tostring(key)))
+        return
+    end
+
+    Citizen.CreateThread(function()
+        while true do
+            DisableControlAction(0, keyHash, true)
+            if onPressed and IsDisabledControlJustPressed(0, keyHash) then
+                onPressed()
+            end
+            if onReleased and IsDisabledControlJustReleased(0, keyHash) then
+                onReleased()
+            end
+            Citizen.Wait(0)
+        end
+    end)
+end
+
+---@param ped number
+---@param animName string
+---@param animDict string
+function YacaPlayRdrFacialAnim(ped, animName, animDict)
+    if not YacaRequestAnimDict(animDict, 1500) then return end
+    SetFacialIdleAnimOverride(ped, animName, animDict)
+end
+
+---@param text string
+---@param duration number|nil
+function YacaDisplayRdrNotification(text, duration)
+    duration = duration or 2000
+    local ok = pcall(function()
+        local str = VarString(10, "LITERAL_STRING", text)
+        Citizen.InvokeNative(0x202709F4C58A0424, str)
+        Citizen.InvokeNative(0x2A4765812202E671)
+    end)
+    if not ok then
+        print(("[YaCA] %s"):format(text))
+    end
 end
